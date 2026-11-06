@@ -39,7 +39,8 @@ class Executor:
             source: get_retriever_cls(source)(config) for source in config.executor.source
         }
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
-        self.openai_client = (LocalLLM() if config.llm.get("backend", "api") == "local"
+        self.openai_client = (LocalLLM(max_input_tokens=config.llm.get("local", {}).get("max_input_tokens", 2048))
+                              if config.llm.get("backend", "api") == "local"
                               else OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url))
     def fetch_zotero_corpus(self) -> list[CorpusPaper]:
         logger.info("Fetching zotero corpus")

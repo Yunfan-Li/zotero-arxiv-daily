@@ -7,7 +7,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from zotero_arxiv_daily.configuration import migrate_legacy_config
-from zotero_arxiv_daily.local_llm import LocalLLM
+from zotero_arxiv_daily.local_llm import LocalLLM, LocalInferenceError
 from zotero_arxiv_daily.protocol import _request_llm
 
 
@@ -82,6 +82,7 @@ def test_custom_configuration_is_not_overwritten(monkeypatch):
 
 def test_local_adapter_lazy_loads_once_and_limits_context(monkeypatch):
     calls = []
+    monkeypatch.setattr('zotero_arxiv_daily.local_llm._available_threads', lambda: 2)
     class Model:
         def tokenize(self, text, add_bos=False):
             return list(text)
@@ -103,8 +104,9 @@ def test_local_adapter_lazy_loads_once_and_limits_context(monkeypatch):
     assert len(loads) == 1
     assert loads[0]['n_ctx'] == 5000
     assert loads[0]['repo_id'] == 'Qwen/Qwen2.5-3B-Instruct-GGUF'
-    assert calls[0]['max_tokens'] == 768
-    assert sum(len(m['content']) for m in calls[0]['messages']) <= 3976
+    assert loads[0]['n_threads'] == 2
+    assert calls[0]['max_tokens'] == 256
+    assert sum(len(m['content']) for m in calls[0]['messages']) <= 2048
     assert len(messages[1]['content']) == 10000
 
 
@@ -124,9 +126,9 @@ def test_local_failure_is_not_silently_sent_as_abstract(monkeypatch):
     from zotero_arxiv_daily.protocol import Paper
     paper = Paper('arxiv', 'title', [], 'abstract', 'https://example.invalid')
     def fail(*args):
-        raise RuntimeError('model unavailable')
+        raise LocalInferenceError('model unavailable')
     monkeypatch.setattr(paper, '_generate_tldr_with_llm', fail)
-    with pytest.raises(RuntimeError, match='model unavailable'):
+    with pytest.raises(LocalInferenceError, match='model unavailable'):
         paper.generate_tldr(LocalLLM(), {'backend': 'local'})
 
 
@@ -172,3 +174,109 @@ def test_main_failure_does_not_log_provider_secrets(config, monkeypatch, capsys)
     captured = capsys.readouterr()
     assert 'private-credential-do-not-log' not in captured.out + captured.err
     assert 'Run failed (RuntimeError)' in captured.out
+    assert 'test_legacy_configuration.py:__init__:' in captured.out
+
+
+@pytest.mark.parametrize('reply', ['No affiliations found.', '[not valid JSON]', 'Truncated ["University"'])
+def test_local_affiliation_format_failure_is_tolerated(reply):
+    from zotero_arxiv_daily.protocol import Paper
+    paper = Paper('arxiv', 'title', [], 'abstract', 'https://example.invalid', full_text='paper introduction')
+    client = SimpleNamespace(generate=lambda messages: reply)
+    assert paper.generate_affiliations(client, {'backend': 'local'}) is None
+    assert paper.affiliations is None
+
+
+def test_local_malformed_then_valid_affiliations_continue():
+    from zotero_arxiv_daily.protocol import Paper
+    replies = iter(['No list here.', '["University"]'])
+    client = SimpleNamespace(generate=lambda messages: next(replies))
+    papers = [Paper('arxiv', 'title', [], 'abstract', 'https://example.invalid', full_text='intro') for _ in range(2)]
+    assert [paper.generate_affiliations(client, {'backend': 'local'}) for paper in papers] == [None, ['University']]
+
+
+@pytest.mark.parametrize('stage', ['load', 'inference'])
+@pytest.mark.parametrize('operation', ['generate_tldr', 'generate_affiliations'])
+def test_real_local_backend_failures_abort_without_exposing_message(monkeypatch, stage, operation):
+    from zotero_arxiv_daily.protocol import Paper
+    secret = 'private-provider-detail'
+    def fail(*args, **kwargs):
+        raise RuntimeError(secret)
+    monkeypatch.setitem(sys.modules, 'llama_cpp', SimpleNamespace(Llama=SimpleNamespace(from_pretrained=fail)))
+    client = LocalLLM()
+    if stage == 'inference':
+        client._model = SimpleNamespace(
+            tokenize=lambda text, **kwargs: list(text),
+            detokenize=lambda tokens: bytes(tokens),
+            create_chat_completion=fail,
+        )
+    paper = Paper('arxiv', 'title', [], 'abstract', 'https://example.invalid', full_text='intro')
+    with pytest.raises(LocalInferenceError) as error:
+        getattr(paper, operation)(client, {'backend': 'local'})
+    assert secret not in str(error.value)
+    assert isinstance(error.value.__cause__, RuntimeError)
+
+
+@pytest.mark.parametrize('budget', [2048, 3976, 4488])
+def test_local_configurable_input_budget_preserves_front_of_prompt(budget):
+    calls = []
+    client = LocalLLM(max_input_tokens=budget)
+    def create(**kwargs):
+        calls.append(kwargs)
+        return {'choices': [{'message': {'content': 'summary'}}]}
+    client._model = SimpleNamespace(
+        tokenize=lambda text, **kwargs: list(text),
+        detokenize=lambda tokens: bytes(tokens),
+        create_chat_completion=create,
+    )
+    system = 'system instructions'
+    prefix = 'Title: Example. Abstract: Important findings. Full text: '
+    client.generate([{'role': 'system', 'content': system},
+                     {'role': 'user', 'content': prefix + 'x' * 10000}])
+    assert calls[0]['messages'][0]['content'] == system
+    assert calls[0]['messages'][1]['content'].startswith(prefix)
+    assert sum(len(m['content']) for m in calls[0]['messages']) == budget
+    assert calls[0]['max_tokens'] == 256
+
+
+@pytest.mark.parametrize('budget', [0, -1, 4489, True, '2048'])
+def test_local_input_budget_validation(budget):
+    with pytest.raises(ValueError, match='max_input_tokens'):
+        LocalLLM(max_input_tokens=budget)
+
+
+def test_local_thread_count_respects_affinity(monkeypatch):
+    from zotero_arxiv_daily import local_llm
+    monkeypatch.setattr(local_llm.os, 'sched_getaffinity', lambda pid: {0, 1}, raising=False)
+    assert local_llm._available_threads() == 2
+    monkeypatch.delattr(local_llm.os, 'sched_getaffinity')
+    monkeypatch.setattr(local_llm.os, 'cpu_count', lambda: None)
+    assert local_llm._available_threads() == 1
+
+
+def test_executor_honors_local_input_budget(legacy):
+    from zotero_arxiv_daily.executor import Executor
+    legacy.llm.local.max_input_tokens = 3976
+    executor = Executor(migrate_legacy_config(legacy))
+    assert executor.openai_client.max_input_tokens == 3976
+
+
+def test_main_reports_safe_inference_cause_location(config, monkeypatch, capsys):
+    from zotero_arxiv_daily import main as main_module
+    secret = 'private-provider-detail'
+    class BrokenExecutor:
+        def __init__(self, cfg):
+            pass
+        def run(self):
+            def model_failure():
+                raise RuntimeError(secret)
+            try:
+                model_failure()
+            except RuntimeError as exc:
+                raise LocalInferenceError('safe message') from exc
+    monkeypatch.setattr(main_module, 'Executor', BrokenExecutor)
+    with pytest.raises(SystemExit):
+        main_module.main.__wrapped__(config)
+    captured = capsys.readouterr()
+    assert secret not in captured.out + captured.err
+    assert 'Run failed (LocalInferenceError)' in captured.out
+    assert 'caused by RuntimeError at test_legacy_configuration.py:model_failure:' in captured.out

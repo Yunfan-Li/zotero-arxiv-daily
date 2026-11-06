@@ -4,6 +4,7 @@ from datetime import datetime
 import re
 import tiktoken
 from openai import OpenAI
+from .local_llm import LocalInferenceError
 from loguru import logger
 import json
 RawPaperItem = TypeVar('RawPaperItem')
@@ -92,7 +93,7 @@ class Paper:
             self.tldr = tldr
             return tldr
         except Exception as e:
-            if llm_params.get("backend", "api") == "local":
+            if isinstance(e, LocalInferenceError):
                 raise
             logger.warning(f"Failed to generate tldr of {self.url} ({type(e).__name__}; details withheld)")
             tldr = self.abstract
@@ -119,7 +120,10 @@ class Paper:
                 ],
             )
 
-            affiliations = re.search(r'\[.*?\]', affiliations, flags=re.DOTALL).group(0)
+            match = re.search(r'\[.*?\]', affiliations, flags=re.DOTALL)
+            if match is None:
+                raise ValueError('LLM response did not contain an affiliation list.')
+            affiliations = match.group(0)
             affiliations = json.loads(affiliations)
             affiliations = list(set(affiliations))
             affiliations = [str(a) for a in affiliations]
@@ -132,7 +136,7 @@ class Paper:
             self.affiliations = affiliations
             return affiliations
         except Exception as e:
-            if llm_params.get("backend", "api") == "local":
+            if isinstance(e, LocalInferenceError):
                 raise
             logger.warning(f"Failed to generate affiliations of {self.url} ({type(e).__name__}; details withheld)")
             self.affiliations = None
