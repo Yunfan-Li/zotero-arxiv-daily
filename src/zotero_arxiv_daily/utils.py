@@ -159,11 +159,11 @@ def send_email(config:DictConfig, html:str):
         server = smtplib.SMTP(smtp_server, smtp_port)
         server.starttls()
     except Exception as e:
-        logger.debug(f"Failed to use TLS. {e}\nTry to use SSL.")
+        logger.debug(f"Failed to use TLS. {type(e).__name__}; details withheld.\nTry to use SSL.")
         try:
             server = smtplib.SMTP_SSL(smtp_server, smtp_port)
         except Exception as e:
-            logger.debug(f"Failed to use SSL. {e}\nTry to use plain text.")
+            logger.debug(f"Failed to use SSL. {type(e).__name__}; details withheld.\nTry to use plain text.")
             server = smtplib.SMTP(smtp_server, smtp_port)
 
     server.login(sender, password)

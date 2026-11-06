@@ -6,17 +6,19 @@ import hydra
 from loguru import logger
 import dotenv
 from zotero_arxiv_daily.executor import Executor
+from zotero_arxiv_daily.configuration import migrate_legacy_config
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 dotenv.load_dotenv()
 
-@hydra.main(version_base=None, config_path="../../config", config_name="default")
-def main(config:DictConfig):
+def _run(config:DictConfig):
+    config = migrate_legacy_config(config)
     # Configure loguru log level based on config
     log_level = "DEBUG" if config.executor.debug else "INFO"
     logger.remove()  # Remove default handler
     logger.add(
         sys.stdout,
         level=log_level,
+        diagnose=False,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
     )
     
@@ -30,6 +32,17 @@ def main(config:DictConfig):
     
     executor = Executor(config)
     executor.run()
+
+@hydra.main(version_base=None, config_path="../../config", config_name="default")
+def main(config:DictConfig):
+    try:
+        _run(config)
+    except Exception as exc:
+        # Provider and interpolation exceptions can contain credentials or full
+        # configuration values. Keep Actions output safe even in debug mode.
+        logger.error("Run failed ({}). Check required settings and service availability; details withheld.", type(exc).__name__)
+        raise SystemExit(1) from None
+
 
 if __name__ == '__main__':
     main()

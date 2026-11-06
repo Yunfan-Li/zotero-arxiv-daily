@@ -24,6 +24,7 @@ def _base_config():
         cfg = compose(
             config_name="default",
             overrides=[
+                "legacy_env=false",
                 "zotero.user_id=000000",
                 "zotero.api_key=fake-zotero-key",
                 "zotero.include_path=null",
@@ -56,3 +57,4 @@ def config(_base_config):
     Safe to mutate inside any test without polluting other tests.
     """
     return copy.deepcopy(_base_config)
+

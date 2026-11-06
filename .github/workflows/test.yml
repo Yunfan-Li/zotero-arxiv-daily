@@ -18,6 +18,7 @@ jobs:
 
       - name: Run script
         env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
           ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
           SENDER: ${{ secrets.SENDER }}
@@ -25,10 +26,20 @@ jobs:
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          ARXIV_QUERY: ${{ secrets.ARXIV_QUERY }}
+          ZOTERO_IGNORE: ${{ vars.ZOTERO_IGNORE }}
+          LANGUAGE: ${{ vars.LANGUAGE }}
+          SEND_EMPTY: ${{ vars.SEND_EMPTY }}
+          MAX_PAPER_NUM: ${{ secrets.MAX_PAPER_NUM || vars.MAX_PAPER_NUM }}
+          USE_LLM_API: ${{ secrets.USE_LLM_API || vars.USE_LLM_API }}
+          MODEL_NAME: ${{ secrets.MODEL_NAME || vars.MODEL_NAME }}
           CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
         run: |
           export DEBUG=true
-          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
-          echo "Use custom config: "
-          cat config/custom.yaml
-          uv run src/zotero_arxiv_daily/main.py
+          if [ -n "${CUSTOM_CONFIG//[[:space:]]/}" ]; then
+            printf '%s\n' "$CUSTOM_CONFIG" > config/custom.yaml
+          fi
+          uv run --with 'llama-cpp-python==0.3.16' --with huggingface-hub src/zotero_arxiv_daily/main.py
+

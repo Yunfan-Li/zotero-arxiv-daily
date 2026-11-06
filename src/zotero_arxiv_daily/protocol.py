@@ -10,6 +10,8 @@ RawPaperItem = TypeVar('RawPaperItem')
 
 
 def _request_llm(openai_client: OpenAI, llm_params: dict, messages: list[dict]) -> str:
+    if llm_params.get("backend", "api") == "local":
+        return openai_client.generate(messages)
     api_mode = llm_params.get("api_mode", "chat_completion")
     generation_kwargs = dict(llm_params.get("generation_kwargs", {}))
 
@@ -90,7 +92,9 @@ class Paper:
             self.tldr = tldr
             return tldr
         except Exception as e:
-            logger.warning(f"Failed to generate tldr of {self.url}: {e}")
+            if llm_params.get("backend", "api") == "local":
+                raise
+            logger.warning(f"Failed to generate tldr of {self.url} ({type(e).__name__}; details withheld)")
             tldr = self.abstract
             self.tldr = tldr
             return tldr
@@ -128,7 +132,9 @@ class Paper:
             self.affiliations = affiliations
             return affiliations
         except Exception as e:
-            logger.warning(f"Failed to generate affiliations of {self.url}: {e}")
+            if llm_params.get("backend", "api") == "local":
+                raise
+            logger.warning(f"Failed to generate affiliations of {self.url} ({type(e).__name__}; details withheld)")
             self.affiliations = None
             return None
 @dataclass

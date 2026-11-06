@@ -11,6 +11,7 @@ from .construct_email import render_email
 from .utils import send_email
 from openai import OpenAI
 from tqdm import tqdm
+from .local_llm import LocalLLM
 
 
 def normalize_path_patterns(patterns: list[str] | ListConfig | None, config_key: str) -> list[str] | None:
@@ -38,7 +39,8 @@ class Executor:
             source: get_retriever_cls(source)(config) for source in config.executor.source
         }
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
-        self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url)
+        self.openai_client = (LocalLLM() if config.llm.get("backend", "api") == "local"
+                              else OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url))
     def fetch_zotero_corpus(self) -> list[CorpusPaper]:
         logger.info("Fetching zotero corpus")
         zot = zotero.Zotero(self.config.zotero.user_id, 'user', self.config.zotero.api_key)
@@ -63,6 +65,15 @@ class Executor:
         ) for c in corpus]
     
     def filter_corpus(self, corpus:list[CorpusPaper]) -> list[CorpusPaper]:
+        legacy_ignore = self.config.zotero.get("legacy_ignore", "") if hasattr(self, "config") else ""
+        if legacy_ignore.strip():
+            import tempfile
+            from gitignore_parser import parse_gitignore
+            with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as rules:
+                rules.write(legacy_ignore)
+                rules.flush()
+                matches = parse_gitignore(rules.name, base_dir="/")
+                corpus = [c for c in corpus if not any(matches("/" + path) for path in c.paths)]
         if self.include_path_patterns:
             logger.info(f"Selecting zotero papers matching include_path: {self.include_path_patterns}")
             corpus = [
@@ -94,7 +105,7 @@ class Executor:
         corpus = self.fetch_zotero_corpus()
         corpus = self.filter_corpus(corpus)
         if len(corpus) == 0:
-            logger.error(f"No zotero papers found. Please check your zotero settings:\n{self.config.zotero}")
+            logger.error("No Zotero papers found. Check library access and collection filters; settings withheld.")
             return
         all_papers = []
         for source, retriever in self.retrievers.items():
@@ -122,3 +133,4 @@ class Executor:
         email_content = render_email(reranked_papers)
         send_email(self.config, email_content)
         logger.info("Email sent successfully")
+
